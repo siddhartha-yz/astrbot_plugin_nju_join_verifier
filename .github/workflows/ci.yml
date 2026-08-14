@@ -40,7 +40,7 @@ jobs:
           ok=0
           for _ in $(seq 1 30); do
             logs="$(docker logs "$container" 2>&1 || true)"
-            if grep -q 'Plugin nju_join_verifier (0.3.1)' <<<"$logs" && grep -q 'AstrBot started.' <<<"$logs"; then
+            if grep -q 'Plugin nju_join_verifier (' <<<"$logs" && grep -q 'AstrBot started.' <<<"$logs"; then
               ok=1
               break
             fi
