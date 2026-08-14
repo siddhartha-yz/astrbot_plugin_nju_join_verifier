@@ -1,0 +1,205 @@
+from __future__ import annotations
+
+import asyncio
+import importlib.util
+import sys
+import types
+from pathlib import Path
+from typing import Any
+
+PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+
+
+def load_main_module():
+    package = types.ModuleType("review_plugin")
+    package.__path__ = [str(PLUGIN_ROOT)]
+    sys.modules["review_plugin"] = package
+    spec = importlib.util.spec_from_file_location("review_plugin.main", PLUGIN_ROOT / "main.py")
+    if spec is None or spec.loader is None:
+        raise RuntimeError("cannot load plugin main module")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+class Message:
+    def __init__(self, raw: dict[str, Any]) -> None:
+        self.raw_message = raw
+
+
+class Bot:
+    def __init__(self, role: str = "admin") -> None:
+        self.role = role
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def call_action(self, action: str, **params: Any) -> dict[str, Any]:
+        self.calls.append((action, params))
+        return {"role": self.role}
+
+
+class Event:
+    def __init__(
+        self,
+        raw: dict[str, Any],
+        *,
+        astr_admin: bool = False,
+        role: str = "admin",
+    ) -> None:
+        self.message_obj = Message(raw)
+        self.bot = Bot(role)
+        self._astr_admin = astr_admin
+        self.stopped = False
+
+    def is_admin(self) -> bool:
+        return self._astr_admin
+
+    def stop_event(self) -> None:
+        self.stopped = True
+
+
+class FakeStore:
+    def __init__(self) -> None:
+        self.records: list[dict[str, Any]] = []
+
+    def get(self, flag: str):
+        return None
+
+    def record(self, **kwargs: Any) -> None:
+        self.records.append(kwargs)
+
+
+class MismatchVerifier:
+    async def verify(self, *, student_id: str, name: str) -> str:
+        return "mismatch"
+
+
+async def check_policy(module) -> None:
+    Main = module.Main
+    plugin = object.__new__(Main)
+    plugin.enabled_groups = frozenset({"target"})
+
+    unrelated = Event(
+        {
+            "group_id": "other",
+            "user_id": "u",
+            "post_type": "request",
+            "request_type": "group",
+            "sub_type": "add",
+        }
+    )
+    await plugin.on_group_join_request(unrelated)
+    assert not unrelated.stopped
+    assert not unrelated.bot.calls
+
+    unrelated_admin = Event({"group_id": "other", "user_id": "u"}, role="owner")
+    assert not await plugin._can_manage(unrelated_admin)
+    assert not unrelated_admin.bot.calls
+
+    target_admin = Event({"group_id": "target", "user_id": "u"}, role="admin")
+    assert await plugin._can_manage(target_admin)
+    assert target_admin.bot.calls[0][0] == "get_group_member_info"
+
+    astr_admin = Event({}, astr_admin=True)
+    assert await plugin._can_manage(astr_admin)
+
+
+async def check_serialization(module) -> None:
+    Main = module.Main
+    plugin = object.__new__(Main)
+    plugin._request_lock = asyncio.Lock()
+    active = 0
+    max_active = 0
+
+    async def fake_locked(self, raw, bot, *, source):
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        await asyncio.sleep(0.03)
+        active -= 1
+
+    plugin._process_request_locked = types.MethodType(fake_locked, plugin)
+    await asyncio.gather(
+        plugin._process_request({}, None, source="event"),
+        plugin._process_request({}, None, source="scan"),
+    )
+    assert max_active == 1
+
+
+async def check_missing_verifier_skips_llm(module) -> None:
+    Main = module.Main
+    plugin = object.__new__(Main)
+    plugin.enabled_groups = frozenset({"target"})
+    plugin.retry_backoff = 300
+    plugin.store = FakeStore()
+    plugin.verifier = None
+    plugin.llm_fallback_enabled = True
+    plugin.auto_approve = True
+    llm_calls = 0
+
+    async def fake_llm(self, comment: str):
+        nonlocal llm_calls
+        llm_calls += 1
+        return None, "unexpected", False
+
+    plugin._answer_from_llm = types.MethodType(fake_llm, plugin)
+    bot = Bot()
+    await plugin._process_request_locked(
+        {
+            "group_id": "target",
+            "user_id": "u",
+            "flag": "no-verifier",
+            "comment": "无法解析的申请",
+        },
+        bot,
+        source="event",
+    )
+    assert llm_calls == 0
+    assert plugin.store.records[-1]["outcome"] == "transient"
+    assert plugin.store.records[-1]["detail"] == "credentials_missing"
+    assert not bot.calls
+
+
+async def check_transient_llm_retry(module) -> None:
+    Main = module.Main
+    plugin = object.__new__(Main)
+    plugin.enabled_groups = frozenset({"target"})
+    plugin.retry_backoff = 300
+    plugin.store = FakeStore()
+    plugin.verifier = MismatchVerifier()
+    plugin.llm_fallback_enabled = True
+    plugin.auto_approve = True
+
+    async def fake_llm(self, comment: str):
+        return None, "provider_error", True
+
+    plugin._answer_from_llm = types.MethodType(fake_llm, plugin)
+    bot = Bot()
+    await plugin._process_request_locked(
+        {
+            "group_id": "target",
+            "user_id": "u",
+            "flag": "f",
+            "comment": "专业张三123456",
+        },
+        bot,
+        source="event",
+    )
+    assert plugin.store.records
+    record = plugin.store.records[-1]
+    assert record["outcome"] == "transient"
+    assert record["detail"] == "llm:provider_error"
+    assert not bot.calls
+
+
+async def main() -> None:
+    module = load_main_module()
+    await check_policy(module)
+    await check_serialization(module)
+    await check_missing_verifier_skips_llm(module)
+    await check_transient_llm_retry(module)
+    print("astrbot_policy_smoke=ok")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

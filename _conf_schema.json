@@ -1,0 +1,73 @@
+{
+  "enabled_groups": {
+    "description": "QQ groups where automatic join verification is enabled",
+    "type": "list",
+    "default": [],
+    "hint": "Only requests for these groups are processed."
+  },
+  "platform_id": {
+    "description": "AstrBot OneBot platform ID",
+    "type": "string",
+    "default": "napcat"
+  },
+  "verifier_base_url": {
+    "description": "Identity verification service URL",
+    "type": "string",
+    "default": "",
+    "hint": "Required. Configure this privately in AstrBot; do not commit the endpoint to the repository."
+  },
+  "verifier_username": {
+    "description": "Verification service username",
+    "type": "string",
+    "default": ""
+  },
+  "verifier_password": {
+    "description": "Verification service password",
+    "type": "string",
+    "default": "",
+    "hint": "Stored only in AstrBot data/config; never commit credentials into the plugin repository."
+  },
+  "dry_run": {
+    "description": "Initial bootstrap mode only; runtime approval is controlled by /njuverify enable|disable",
+    "type": "bool",
+    "default": true,
+    "hint": "Only used to initialize runtime state on first launch. After that, /njuverify status is authoritative."
+  },
+  "scan_interval_seconds": {
+    "description": "Pending request reconciliation interval",
+    "type": "int",
+    "default": 60
+  },
+  "retry_backoff_seconds": {
+    "description": "Retry delay for transient verification failures",
+    "type": "int",
+    "default": 300
+  },
+  "min_verify_interval_seconds": {
+    "description": "Minimum delay between verification service requests",
+    "type": "float",
+    "default": 1.5
+  },
+  "llm_fallback_enabled": {
+    "description": "Use an AstrBot LLM provider only when deterministic answer parsing is insufficient",
+    "type": "bool",
+    "default": true,
+    "hint": "The student ID and QQ number are never sent to the LLM; only the non-ID answer fragment is sent."
+  },
+  "llm_fallback_provider_id": {
+    "description": "AstrBot chat provider used for fallback name-boundary extraction",
+    "type": "string",
+    "default": "deepseek/deepseek-v4-flash"
+  },
+  "llm_fallback_timeout_seconds": {
+    "description": "Timeout for one LLM fallback call",
+    "type": "int",
+    "default": 20
+  },
+  "llm_fallback_max_tokens": {
+    "description": "Completion-token budget for the fallback model",
+    "type": "int",
+    "default": 256,
+    "hint": "DeepSeek V4 may spend part of this budget on reasoning before emitting the name."
+  }
+}
