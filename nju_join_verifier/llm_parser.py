@@ -1,67 +1,86 @@
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 
-from .parser import AnswerParseError
-
 _FULLWIDTH_DIGITS = str.maketrans("０１２３４５６７８９", "0123456789")
-_STUDENT_ID_RE = re.compile(r"\d{6,20}")
 _NAME_RE = re.compile(r"[\u4e00-\u9fff·]{2,8}")
+_STUDENT_ID_RE = re.compile(r"\d{6,20}")
 _TRIM_CHARS = " \t\r\n+＋/／,，;；:：-_—|｜()（）[]【】{}<>《》"
 
 
+class LLMParseError(ValueError):
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
 @dataclass(frozen=True, slots=True)
-class LLMFallbackInput:
-    context: str
+class ParsedIdentity:
+    name: str
     student_id: str
 
 
-def _answer_only(comment: str) -> str:
+def extract_answer_text(comment: str) -> str:
+    """Return only the applicant's answer, normalized for full-width digits."""
+
     text = comment.translate(_FULLWIDTH_DIGITS).replace("\r\n", "\n").replace("\r", "\n").strip()
     if not text:
-        raise AnswerParseError("empty")
+        raise LLMParseError("empty")
+
     match = re.search(r"(?:^|\n)\s*答案\s*[:：]\s*(.+)\Z", text, re.DOTALL)
     if match:
-        return match.group(1).strip()
-    nonempty = [line.strip() for line in text.split("\n") if line.strip()]
-    if len(nonempty) > 1 and any("问题" in line for line in nonempty[:-1]):
-        return re.sub(r"^答案\s*[:：]\s*", "", nonempty[-1]).strip()
+        text = match.group(1).strip()
+    else:
+        nonempty = [line.strip() for line in text.split("\n") if line.strip()]
+        if len(nonempty) > 1 and any("问题" in line for line in nonempty[:-1]):
+            text = re.sub(r"^答案\s*[:：]\s*", "", nonempty[-1]).strip()
+
+    text = text.strip(_TRIM_CHARS)
+    if not text or len(text) > 300:
+        raise LLMParseError("answer_length_invalid")
     return text
 
 
-def prepare_llm_fallback(comment: str) -> LLMFallbackInput:
-    """Extract one student ID locally and return only the non-ID text for LLM use.
+def _strip_optional_json_fence(text: str) -> str:
+    stripped = text.strip()
+    match = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", stripped, re.IGNORECASE | re.DOTALL)
+    return match.group(1).strip() if match else stripped
 
-    The student ID is deliberately excluded from ``context`` so the model never
-    needs to receive it. A fallback is rejected when the answer contains zero or
-    multiple plausible student-ID runs.
+
+def parse_llm_identity(output: str, source_answer: str) -> ParsedIdentity:
+    """Accept only an extractive name/student-ID pair returned by the model.
+
+    The LLM is not trusted to invent or normalize arbitrary identity data. Both
+    fields must be present in the original answer after conservative formatting
+    normalization, and the external verification service remains authoritative.
     """
-
-    answer = _answer_only(comment)
-    matches = list(_STUDENT_ID_RE.finditer(answer))
-    if len(matches) != 1:
-        raise AnswerParseError("llm_student_id_ambiguous")
-    match = matches[0]
-    student_id = match.group(0)
-    context = (answer[: match.start()] + answer[match.end() :]).strip(_TRIM_CHARS)
-    context = re.sub(r"\s+", " ", context).strip()
-    if len(context) < 2 or len(context) > 100:
-        raise AnswerParseError("llm_context_invalid")
-    return LLMFallbackInput(context=context, student_id=student_id)
-
-
-def parse_llm_name(output: str, source_context: str) -> str:
-    """Accept only an extractive Chinese-name answer from the model."""
 
     text = output.strip()
     if text.upper() == "UNKNOWN":
-        raise AnswerParseError("llm_unknown")
-    text = text.strip("`'\"“”‘’ \t\r\n")
-    if not _NAME_RE.fullmatch(text):
-        raise AnswerParseError("llm_output_invalid")
+        raise LLMParseError("llm_unknown")
 
-    compact_source = re.sub(r"[\s+＋/／,，;；:：\-_—|｜()（）\[\]【】{}<>《》]", "", source_context)
-    if text not in compact_source:
-        raise AnswerParseError("llm_not_extractable")
-    return text
+    try:
+        data = json.loads(_strip_optional_json_fence(text))
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise LLMParseError("llm_output_invalid") from exc
+
+    if not isinstance(data, dict) or set(data) != {"name", "student_id"}:
+        raise LLMParseError("llm_output_invalid")
+
+    name = str(data.get("name", "")).strip()
+    student_id = str(data.get("student_id", "")).translate(_FULLWIDTH_DIGITS).strip()
+    if not _NAME_RE.fullmatch(name):
+        raise LLMParseError("llm_name_invalid")
+    if not _STUDENT_ID_RE.fullmatch(student_id):
+        raise LLMParseError("llm_student_id_invalid")
+
+    normalized_source = source_answer.translate(_FULLWIDTH_DIGITS)
+    compact_source = re.sub(r"[\s+＋/／,，;；:：\-_—|｜()（）\[\]【】{}<>《》]", "", normalized_source)
+    if name not in compact_source:
+        raise LLMParseError("llm_name_not_extractable")
+    if student_id not in compact_source:
+        raise LLMParseError("llm_student_id_not_extractable")
+
+    return ParsedIdentity(name=name, student_id=student_id)

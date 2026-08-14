@@ -69,9 +69,13 @@ class FakeStore:
         self.records.append(kwargs)
 
 
-class MismatchVerifier:
+class MatchingVerifier:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str]] = []
+
     async def verify(self, *, student_id: str, name: str) -> str:
-        return "mismatch"
+        self.calls.append((student_id, name))
+        return "match"
 
 
 async def check_policy(module) -> None:
@@ -104,26 +108,34 @@ async def check_policy(module) -> None:
     assert await plugin._can_manage(astr_admin)
 
 
-async def check_serialization(module) -> None:
+async def check_per_request_serialization(module) -> None:
     Main = module.Main
     plugin = object.__new__(Main)
-    plugin._request_lock = asyncio.Lock()
-    active = 0
-    max_active = 0
+    plugin._request_locks = {}
+    active_by_flag: dict[str, int] = {}
+    max_by_flag: dict[str, int] = {}
+    total_active = 0
+    max_total_active = 0
 
     async def fake_locked(self, raw, bot, *, source):
-        nonlocal active, max_active
-        active += 1
-        max_active = max(max_active, active)
+        nonlocal total_active, max_total_active
+        flag = str(raw["flag"])
+        active_by_flag[flag] = active_by_flag.get(flag, 0) + 1
+        max_by_flag[flag] = max(max_by_flag.get(flag, 0), active_by_flag[flag])
+        total_active += 1
+        max_total_active = max(max_total_active, total_active)
         await asyncio.sleep(0.03)
-        active -= 1
+        active_by_flag[flag] -= 1
+        total_active -= 1
 
     plugin._process_request_locked = types.MethodType(fake_locked, plugin)
     await asyncio.gather(
-        plugin._process_request({}, None, source="event"),
-        plugin._process_request({}, None, source="scan"),
+        plugin._process_request({"flag": "same"}, None, source="event"),
+        plugin._process_request({"flag": "same"}, None, source="scan"),
+        plugin._process_request({"flag": "other"}, None, source="event"),
     )
-    assert max_active == 1
+    assert max_by_flag["same"] == 1
+    assert max_total_active >= 2
 
 
 async def check_missing_verifier_skips_llm(module) -> None:
@@ -133,7 +145,7 @@ async def check_missing_verifier_skips_llm(module) -> None:
     plugin.retry_backoff = 300
     plugin.store = FakeStore()
     plugin.verifier = None
-    plugin.llm_fallback_enabled = True
+    plugin.llm_parser_enabled = True
     plugin.auto_approve = True
     llm_calls = 0
 
@@ -142,14 +154,14 @@ async def check_missing_verifier_skips_llm(module) -> None:
         llm_calls += 1
         return None, "unexpected", False
 
-    plugin._answer_from_llm = types.MethodType(fake_llm, plugin)
+    plugin._identity_from_llm = types.MethodType(fake_llm, plugin)
     bot = Bot()
     await plugin._process_request_locked(
         {
             "group_id": "target",
             "user_id": "u",
             "flag": "no-verifier",
-            "comment": "无法解析的申请",
+            "comment": "张三 12345678",
         },
         bot,
         source="event",
@@ -160,32 +172,65 @@ async def check_missing_verifier_skips_llm(module) -> None:
     assert not bot.calls
 
 
+async def check_every_request_uses_llm(module) -> None:
+    Main = module.Main
+    plugin = object.__new__(Main)
+    plugin.enabled_groups = frozenset({"target"})
+    plugin.retry_backoff = 300
+    plugin.store = FakeStore()
+    verifier = MatchingVerifier()
+    plugin.verifier = verifier
+    plugin.llm_parser_enabled = True
+    plugin.auto_approve = False
+    llm_inputs: list[str] = []
+
+    async def fake_llm(self, comment: str):
+        llm_inputs.append(comment)
+        return module.ParsedIdentity(name="张三", student_id="12345678"), "ok", False
+
+    plugin._identity_from_llm = types.MethodType(fake_llm, plugin)
+    bot = Bot()
+    await plugin._process_request_locked(
+        {
+            "group_id": "target",
+            "user_id": "u",
+            "flag": "simple",
+            "comment": "张三 12345678",
+        },
+        bot,
+        source="event",
+    )
+    assert llm_inputs == ["张三 12345678"]
+    assert verifier.calls == [("12345678", "张三")]
+    assert plugin.store.records[-1]["outcome"] == "dry_run_match"
+    assert plugin.store.records[-1]["detail"] == "format:llm_identity"
+
+
 async def check_transient_llm_retry(module) -> None:
     Main = module.Main
     plugin = object.__new__(Main)
     plugin.enabled_groups = frozenset({"target"})
     plugin.retry_backoff = 300
     plugin.store = FakeStore()
-    plugin.verifier = MismatchVerifier()
-    plugin.llm_fallback_enabled = True
+    plugin.verifier = MatchingVerifier()
+    plugin.llm_parser_enabled = True
     plugin.auto_approve = True
 
     async def fake_llm(self, comment: str):
         return None, "provider_error", True
 
-    plugin._answer_from_llm = types.MethodType(fake_llm, plugin)
+    plugin._identity_from_llm = types.MethodType(fake_llm, plugin)
     bot = Bot()
     await plugin._process_request_locked(
         {
             "group_id": "target",
             "user_id": "u",
             "flag": "f",
-            "comment": "专业张三123456",
+            "comment": "张三 12345678",
         },
         bot,
         source="event",
     )
-    assert plugin.store.records
     record = plugin.store.records[-1]
     assert record["outcome"] == "transient"
     assert record["detail"] == "llm:provider_error"
@@ -195,8 +240,9 @@ async def check_transient_llm_retry(module) -> None:
 async def main() -> None:
     module = load_main_module()
     await check_policy(module)
-    await check_serialization(module)
+    await check_per_request_serialization(module)
     await check_missing_verifier_skips_llm(module)
+    await check_every_request_uses_llm(module)
     await check_transient_llm_retry(module)
     print("astrbot_policy_smoke=ok")
 

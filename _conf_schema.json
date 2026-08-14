@@ -48,26 +48,26 @@
     "type": "float",
     "default": 1.5
   },
-  "llm_fallback_enabled": {
-    "description": "Use an AstrBot LLM provider only when deterministic answer parsing is insufficient",
+  "llm_parser_enabled": {
+    "description": "Parse every join application with an AstrBot LLM provider",
     "type": "bool",
     "default": true,
-    "hint": "The student ID and QQ number are never sent to the LLM; only the non-ID answer fragment is sent."
+    "hint": "The LLM receives only the applicant answer text and returns name + student ID. QQ/group IDs are not sent."
   },
-  "llm_fallback_provider_id": {
-    "description": "AstrBot chat provider used for fallback name-boundary extraction",
+  "llm_parser_provider_id": {
+    "description": "AstrBot chat provider used to extract name and student ID from every application",
     "type": "string",
     "default": "deepseek/deepseek-v4-flash"
   },
-  "llm_fallback_timeout_seconds": {
-    "description": "Timeout for one LLM fallback call",
+  "llm_parser_timeout_seconds": {
+    "description": "Timeout for one LLM identity parsing call",
     "type": "int",
     "default": 20
   },
-  "llm_fallback_max_tokens": {
-    "description": "Completion-token budget for the fallback model",
+  "llm_parser_max_tokens": {
+    "description": "Completion-token budget for the identity parser",
     "type": "int",
     "default": 256,
-    "hint": "DeepSeek V4 may spend part of this budget on reasoning before emitting the name."
+    "hint": "DeepSeek V4 may spend part of this budget on reasoning before emitting the JSON result."
   }
 }

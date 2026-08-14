@@ -16,7 +16,7 @@ class ReviewState:
 class ReviewStore:
     """Minimal idempotency/audit store.
 
-    Intentionally stores no applicant name, major, student ID, or raw answer.
+    Intentionally stores no applicant name, student ID, or raw answer.
     """
 
     def __init__(self, path: Path) -> None:
