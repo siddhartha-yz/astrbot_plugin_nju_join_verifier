@@ -144,7 +144,7 @@ class IdentityVerifier:
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession(
                 timeout=self.timeout,
-                headers={"User-Agent": "AstrBot-NJU-Join-Verifier/0.4.0"},
+                headers={"User-Agent": "AstrBot-NJU-Join-Verifier/0.4.1"},
             )
         return self._session
 

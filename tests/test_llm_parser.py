@@ -33,6 +33,15 @@ def test_parse_identity_accepts_json_fence():
     assert parsed.name == "张三"
 
 
+def test_parse_identity_accepts_long_unicode_name_with_middle_dot():
+    name = "阿布都热依木·买买提"
+    parsed = parse_llm_identity(
+        f'{{"name":"{name}","student_id":"12345678"}}',
+        f"{name} 12345678",
+    )
+    assert parsed.name == name
+
+
 def test_parse_identity_ignores_extra_major_but_requires_extractiveness():
     parsed = parse_llm_identity(
         '{"name":"张三","student_id":"12345678"}',

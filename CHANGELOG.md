@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.1
+
+- Recheck the QQ request immediately before approval; if another administrator already handled it, record `already_handled` instead of claiming a bot approval.
+- Reclaim per-request locks after all duplicate observers finish, preventing unbounded lock-map growth.
+- Retry one malformed/non-extractive LLM response once with a stricter correction prompt before falling back to manual review.
+- Accept longer Unicode-letter names with middle-dot separators while preserving extractive matching and external verification.
+
 ## 0.4.0
 
 - Remove major/department from the verification decision; only name and student ID matter.

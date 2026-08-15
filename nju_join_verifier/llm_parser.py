@@ -5,9 +5,9 @@ import re
 from dataclasses import dataclass
 
 _FULLWIDTH_DIGITS = str.maketrans("０１２３４５６７８９", "0123456789")
-_NAME_RE = re.compile(r"[\u4e00-\u9fff·]{2,8}")
 _STUDENT_ID_RE = re.compile(r"\d{6,20}")
 _TRIM_CHARS = " \t\r\n+＋/／,，;；:：-_—|｜()（）[]【】{}<>《》"
+_NAME_SEPARATORS = {"·", "•", "・"}
 
 
 class LLMParseError(ValueError):
@@ -20,6 +20,24 @@ class LLMParseError(ValueError):
 class ParsedIdentity:
     name: str
     student_id: str
+
+
+def _valid_name(name: str) -> bool:
+    if not 2 <= len(name) <= 30:
+        return False
+    if not name[0].isalpha() or not name[-1].isalpha():
+        return False
+    previous_separator = False
+    for char in name:
+        if char in _NAME_SEPARATORS:
+            if previous_separator:
+                return False
+            previous_separator = True
+            continue
+        if not char.isalpha():
+            return False
+        previous_separator = False
+    return True
 
 
 def extract_answer_text(comment: str) -> str:
@@ -71,7 +89,7 @@ def parse_llm_identity(output: str, source_answer: str) -> ParsedIdentity:
 
     name = str(data.get("name", "")).strip()
     student_id = str(data.get("student_id", "")).translate(_FULLWIDTH_DIGITS).strip()
-    if not _NAME_RE.fullmatch(name):
+    if not _valid_name(name):
         raise LLMParseError("llm_name_invalid")
     if not _STUDENT_ID_RE.fullmatch(student_id):
         raise LLMParseError("llm_student_id_invalid")

@@ -112,6 +112,8 @@ async def check_per_request_serialization(module) -> None:
     Main = module.Main
     plugin = object.__new__(Main)
     plugin._request_locks = {}
+    plugin._request_lock_users = {}
+    plugin._request_locks_guard = asyncio.Lock()
     active_by_flag: dict[str, int] = {}
     max_by_flag: dict[str, int] = {}
     total_active = 0
@@ -136,6 +138,8 @@ async def check_per_request_serialization(module) -> None:
     )
     assert max_by_flag["same"] == 1
     assert max_total_active >= 2
+    assert plugin._request_locks == {}
+    assert plugin._request_lock_users == {}
 
 
 async def check_missing_verifier_skips_llm(module) -> None:
@@ -237,6 +241,79 @@ async def check_transient_llm_retry(module) -> None:
     assert not bot.calls
 
 
+async def check_already_handled_is_not_counted_as_bot_approval(module) -> None:
+    Main = module.Main
+    plugin = object.__new__(Main)
+    plugin.enabled_groups = frozenset({"target"})
+    plugin.retry_backoff = 300
+    plugin.store = FakeStore()
+    plugin.verifier = MatchingVerifier()
+    plugin.llm_parser_enabled = True
+    plugin.auto_approve = True
+
+    async def fake_llm(self, comment: str):
+        return module.ParsedIdentity(name="张三", student_id="12345678"), "ok", False
+
+    plugin._identity_from_llm = types.MethodType(fake_llm, plugin)
+
+    class AlreadyHandledBot(Bot):
+        async def call_action(self, action: str, **params: Any):
+            self.calls.append((action, params))
+            if action == "get_group_system_msg":
+                return {
+                    "join_requests": [
+                        {"request_id": "handled", "group_id": "target", "checked": True}
+                    ]
+                }
+            return None
+
+    bot = AlreadyHandledBot()
+    await plugin._process_request_locked(
+        {
+            "group_id": "target",
+            "user_id": "u",
+            "flag": "handled",
+            "comment": "张三 12345678",
+        },
+        bot,
+        source="event",
+    )
+    assert plugin.store.records[-1]["outcome"] == "already_handled"
+    assert plugin.store.records[-1]["detail"] == "matched_but_already_checked"
+    assert all(action != "set_group_add_request" for action, _ in bot.calls)
+
+
+async def check_llm_format_error_retries_once(module) -> None:
+    Main = module.Main
+    plugin = object.__new__(Main)
+    plugin.llm_parser_enabled = True
+    plugin.llm_provider_id = "fake"
+    plugin.llm_timeout = 5
+    plugin.llm_max_tokens = 256
+
+    class Response:
+        def __init__(self, text: str) -> None:
+            self.completion_text = text
+
+    class Context:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def llm_generate(self, **kwargs: Any):
+            self.calls += 1
+            if self.calls == 1:
+                return Response("姓名是张三，学号是12345678")
+            return Response('{"name":"张三","student_id":"12345678"}')
+
+    context = Context()
+    plugin._context = context
+    identity, detail, transient = await plugin._identity_from_llm("姓名：张三 学号：12345678")
+    assert identity == module.ParsedIdentity(name="张三", student_id="12345678")
+    assert detail == "ok"
+    assert transient is False
+    assert context.calls == 2
+
+
 async def main() -> None:
     module = load_main_module()
     await check_policy(module)
@@ -244,6 +321,8 @@ async def main() -> None:
     await check_missing_verifier_skips_llm(module)
     await check_every_request_uses_llm(module)
     await check_transient_llm_retry(module)
+    await check_already_handled_is_not_counted_as_bot_approval(module)
+    await check_llm_format_error_retries_once(module)
     print("astrbot_policy_smoke=ok")
 
 

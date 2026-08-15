@@ -124,6 +124,8 @@ class Main(Star):
         # observations cannot double-approve while unrelated applicants can still
         # be parsed by the LLM concurrently.
         self._request_locks: dict[str, asyncio.Lock] = {}
+        self._request_lock_users: dict[str, int] = {}
+        self._request_locks_guard = asyncio.Lock()
         self._scan_task = asyncio.get_running_loop().create_task(self._scan_loop())
         logger.info(
             "NJU Join Verifier loaded: groups=%d auto_approve=%s credentials=%s scan=%ds llm_parser=%s",
@@ -251,9 +253,20 @@ class Main(Star):
         flag = str(raw.get("flag") or "").strip()
         if not flag:
             return
-        lock = self._request_locks.setdefault(flag, asyncio.Lock())
-        async with lock:
-            await self._process_request_locked(raw, bot, source=source)
+        async with self._request_locks_guard:
+            lock = self._request_locks.setdefault(flag, asyncio.Lock())
+            self._request_lock_users[flag] = self._request_lock_users.get(flag, 0) + 1
+        try:
+            async with lock:
+                await self._process_request_locked(raw, bot, source=source)
+        finally:
+            async with self._request_locks_guard:
+                users = self._request_lock_users.get(flag, 1) - 1
+                if users <= 0 and self._request_locks.get(flag) is lock:
+                    self._request_lock_users.pop(flag, None)
+                    self._request_locks.pop(flag, None)
+                else:
+                    self._request_lock_users[flag] = users
 
     async def _process_request_locked(
         self,
@@ -272,7 +285,7 @@ class Main(Star):
         previous = self.store.get(flag)
         now = int(time.time())
         if previous is not None:
-            if previous.outcome in {"approved", "manual"}:
+            if previous.outcome in {"approved", "manual", "already_handled"}:
                 return
             if previous.outcome == "transient" and now - previous.updated_at < self.retry_backoff:
                 return
@@ -380,6 +393,23 @@ class Main(Star):
                 )
                 return
 
+            checked = await self._request_checked(bot, flag=flag, group_id=group_id)
+            if checked is True:
+                self.store.record(
+                    flag=flag,
+                    group_id=group_id,
+                    user_id=user_id,
+                    outcome="already_handled",
+                    detail="matched_but_already_checked",
+                )
+                logger.info(
+                    "Join request already handled before auto-approval: group=%s user=%s source=%s",
+                    group_id,
+                    _mask_id(user_id),
+                    source,
+                )
+                return
+
             params: dict[str, Any] = {"flag": flag, "approve": True}
             self_id = str(raw.get("self_id") or "").strip()
             if self_id.isdigit():
@@ -447,6 +477,40 @@ class Main(Star):
             result,
         )
 
+    async def _request_checked(
+        self,
+        bot: Any,
+        *,
+        flag: str,
+        group_id: str,
+    ) -> bool | None:
+        """Return whether QQ already considers this request handled.
+
+        ``None`` means the current system-message window cannot answer
+        authoritatively. In that case approval proceeds as before rather than
+        dropping a valid request.
+        """
+
+        try:
+            data = await bot.call_action("get_group_system_msg", count=100)
+        except Exception as exc:  # noqa: BLE001 - best-effort race check
+            logger.debug("Cannot recheck join-request state: %s", type(exc).__name__)
+            return None
+        if not isinstance(data, Mapping):
+            return None
+        requests = data.get("join_requests")
+        if not isinstance(requests, list):
+            return None
+        for item in requests:
+            if not isinstance(item, Mapping):
+                continue
+            if str(item.get("request_id") or "") != flag:
+                continue
+            if str(item.get("group_id") or "") != group_id:
+                continue
+            return bool(item.get("checked"))
+        return None
+
     async def _identity_from_llm(
         self,
         comment: str,
@@ -474,26 +538,43 @@ class Main(Star):
             "{\"name\":\"原样姓名\",\"student_id\":\"学号\"}。"
             "无法同时可靠确定姓名和学号时，只输出 UNKNOWN。不要解释。"
         )
-        try:
-            response = await asyncio.wait_for(
-                self._context.llm_generate(
-                    chat_provider_id=self.llm_provider_id,
-                    prompt=answer_text,
-                    system_prompt=system_prompt,
-                    temperature=0,
-                    max_tokens=self.llm_max_tokens,
-                ),
-                timeout=self.llm_timeout,
-            )
-        except Exception as exc:  # noqa: BLE001 - optional provider boundary
-            logger.warning("LLM join-identity parser unavailable: %s", type(exc).__name__)
-            return None, "provider_error", True
+        retryable_parse_errors = {
+            "llm_output_invalid",
+            "llm_name_invalid",
+            "llm_student_id_invalid",
+            "llm_name_not_extractable",
+            "llm_student_id_not_extractable",
+        }
+        for attempt in range(2):
+            attempt_prompt = system_prompt
+            if attempt:
+                attempt_prompt += (
+                    "这是格式纠正重试：严格只输出指定 JSON，不要输出 Markdown、解释或额外字段。"
+                )
+            try:
+                response = await asyncio.wait_for(
+                    self._context.llm_generate(
+                        chat_provider_id=self.llm_provider_id,
+                        prompt=answer_text,
+                        system_prompt=attempt_prompt,
+                        temperature=0,
+                        max_tokens=self.llm_max_tokens,
+                    ),
+                    timeout=self.llm_timeout,
+                )
+            except Exception as exc:  # noqa: BLE001 - optional provider boundary
+                logger.warning("LLM join-identity parser unavailable: %s", type(exc).__name__)
+                return None, "provider_error", True
 
-        try:
-            identity = parse_llm_identity(response.completion_text or "", answer_text)
-        except LLMParseError as exc:
-            return None, exc.code, False
-        return identity, "ok", False
+            try:
+                identity = parse_llm_identity(response.completion_text or "", answer_text)
+            except LLMParseError as exc:
+                if attempt == 0 and exc.code in retryable_parse_errors:
+                    logger.info("LLM join-identity output rejected; retrying once: %s", exc.code)
+                    continue
+                return None, exc.code, False
+            return identity, "ok", False
+        return None, "llm_output_invalid", False
 
     async def _scan_loop(self) -> None:
         await asyncio.sleep(15)
