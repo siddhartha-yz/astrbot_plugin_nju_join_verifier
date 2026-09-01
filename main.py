@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from time import monotonic
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -275,6 +276,13 @@ class Main(Star):
         *,
         source: str,
     ) -> None:
+        request_started = monotonic()
+        logger.info(
+            "Join request processing started: group=%s user=%s source=%s",
+            raw.get("group_id"),
+            _mask_id(str(raw.get("user_id") or "")),
+            source,
+        )
         group_id = str(raw.get("group_id") or "").strip()
         user_id = str(raw.get("user_id") or "").strip()
         flag = str(raw.get("flag") or "").strip()
@@ -311,7 +319,15 @@ class Main(Star):
             )
             return
 
+        llm_started = monotonic()
         identity, llm_detail, llm_transient = await self._identity_from_llm(comment)
+        logger.info(
+            "Join request LLM stage finished: group=%s user=%s cost=%.3fs result=%s",
+            group_id,
+            _mask_id(user_id),
+            monotonic() - llm_started,
+            llm_detail,
+        )
         if identity is None:
             outcome = "transient" if llm_transient else "manual"
             self.store.record(
@@ -341,9 +357,17 @@ class Main(Star):
 
         result = "mismatch"
         try:
+            verify_started = monotonic()
             result = await self.verifier.verify(
                 student_id=identity.student_id,
                 name=identity.name,
+            )
+            logger.info(
+                "Join request verify stage finished: group=%s user=%s cost=%.3fs result=%s",
+                group_id,
+                _mask_id(user_id),
+                monotonic() - verify_started,
+                result,
             )
         except VerifierAuthenticationError as exc:
             self.store.record(
@@ -393,7 +417,15 @@ class Main(Star):
                 )
                 return
 
+            checked_started = monotonic()
             checked = await self._request_checked(bot, flag=flag, group_id=group_id)
+            logger.info(
+                "Join request state-check finished: group=%s user=%s cost=%.3fs checked=%s",
+                group_id,
+                _mask_id(user_id),
+                monotonic() - checked_started,
+                checked,
+            )
             if checked is True:
                 self.store.record(
                     flag=flag,
@@ -415,7 +447,14 @@ class Main(Star):
             if self_id.isdigit():
                 params["self_id"] = int(self_id)
             try:
+                approve_started = monotonic()
                 await bot.call_action("set_group_add_request", **params)
+                logger.info(
+                    "Join request approve action finished: group=%s user=%s cost=%.3fs",
+                    group_id,
+                    _mask_id(user_id),
+                    monotonic() - approve_started,
+                )
             except Exception as exc:  # noqa: BLE001 - third-party OneBot boundary
                 self.store.record(
                     flag=flag,
@@ -440,10 +479,11 @@ class Main(Star):
                 detail="format:llm_identity",
             )
             logger.info(
-                "Join request auto-approved: group=%s user=%s source=%s",
+                "Join request auto-approved: group=%s user=%s source=%s total_cost=%.3fs",
                 group_id,
                 _mask_id(user_id),
                 source,
+                monotonic() - request_started,
             )
             return
 
