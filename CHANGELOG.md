@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.0
+
+- Add optional private QQ notifications for definite identity-verification failures.
+- Persist notification delivery state and retry failed sends from the background scan loop without storing names or student IDs.
+
 ## 0.4.1
 
 - Recheck the QQ request immediately before approval; if another administrator already handled it, record `already_handled` instead of claiming a bot approval.

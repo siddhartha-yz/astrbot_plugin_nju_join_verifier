@@ -13,6 +13,14 @@ class ReviewState:
     updated_at: int
 
 
+@dataclass(frozen=True, slots=True)
+class FailureNotification:
+    flag: str
+    group_id: str
+    user_id: str
+    result: str
+
+
 class ReviewStore:
     """Minimal idempotency/audit store.
 
@@ -33,6 +41,19 @@ class ReviewStore:
                 outcome TEXT NOT NULL,
                 detail TEXT NOT NULL,
                 updated_at INTEGER NOT NULL
+            )
+            """
+        )
+        self._db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS failure_notifications (
+                flag TEXT PRIMARY KEY,
+                group_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                result TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                last_attempt_at INTEGER NOT NULL DEFAULT 0,
+                sent_at INTEGER
             )
             """
         )
@@ -69,6 +90,66 @@ class ReviewStore:
                 updated_at = excluded.updated_at
             """,
             (flag, group_id, user_id, outcome, detail, now),
+        )
+        self._db.commit()
+
+    def queue_failure_notification(
+        self,
+        *,
+        flag: str,
+        group_id: str,
+        user_id: str,
+        result: str,
+    ) -> None:
+        now = int(time.time())
+        self._db.execute(
+            """
+            INSERT OR IGNORE INTO failure_notifications(
+                flag, group_id, user_id, result, created_at, last_attempt_at, sent_at
+            ) VALUES (?, ?, ?, ?, ?, 0, NULL)
+            """,
+            (flag, group_id, user_id, result, now),
+        )
+        self._db.commit()
+
+    def pending_failure_notifications(
+        self,
+        *,
+        retry_after_seconds: int,
+        limit: int = 20,
+    ) -> list[FailureNotification]:
+        now = int(time.time())
+        rows = self._db.execute(
+            """
+            SELECT flag, group_id, user_id, result
+            FROM failure_notifications
+            WHERE sent_at IS NULL
+              AND (? - last_attempt_at) >= ?
+            ORDER BY created_at ASC
+            LIMIT ?
+            """,
+            (now, retry_after_seconds, limit),
+        ).fetchall()
+        return [
+            FailureNotification(
+                flag=str(row[0]),
+                group_id=str(row[1]),
+                user_id=str(row[2]),
+                result=str(row[3]),
+            )
+            for row in rows
+        ]
+
+    def mark_failure_notification_attempt(self, flag: str, *, sent: bool) -> None:
+        now = int(time.time())
+        self._db.execute(
+            """
+            UPDATE failure_notifications
+            SET last_attempt_at = ?,
+                sent_at = CASE WHEN ? THEN ? ELSE sent_at END
+            WHERE flag = ?
+            """,
+            (now, int(sent), now, flag),
         )
         self._db.commit()
 

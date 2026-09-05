@@ -10,7 +10,7 @@ The verification-service endpoint and credentials are deployment secrets. Config
 
 Runtime approval state is stored separately in `data/plugin_data/nju_join_verifier/auto_approve.state`, not in the credential-bearing AstrBot config. Owners/admins of configured target groups, or AstrBot admins, can use `/njuverify status`, `/njuverify enable`, and `/njuverify disable`. The legacy `dry_run` config value is used only to bootstrap the initial runtime state.
 
-Malformed or non-extractive LLM output is retried once with a stricter correction prompt; persistent ambiguity, mismatches, unknown IDs, rate limits, provider failures, login failures, and network errors remain pending for human review or transient retry. The plugin never auto-rejects.
+Malformed or non-extractive LLM output is retried once with a stricter correction prompt; persistent ambiguity, mismatches, unknown IDs, rate limits, provider failures, login failures, and network errors remain pending for human review or transient retry. Definite verifier failures can optionally trigger an idempotent private QQ notification to a configured administrator, containing only the applicant QQ, group ID, and failure type. The plugin never auto-rejects.
 
 Besides real-time OneBot request events, the plugin periodically calls `get_group_system_msg` so requests that arrived while AstrBot was restarting or disconnected can still be processed. Duplicate observations of the same request are serialized, while unrelated applications may be parsed concurrently. Immediately before automatic approval, the plugin rechecks the QQ system request state; if another administrator has already handled the request, it records `already_handled` instead of claiming a bot approval.
 

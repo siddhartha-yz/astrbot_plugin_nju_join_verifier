@@ -61,12 +61,28 @@ class Event:
 class FakeStore:
     def __init__(self) -> None:
         self.records: list[dict[str, Any]] = []
+        self.notifications: dict[str, Any] = {}
+        self.notification_attempts: list[tuple[str, bool]] = []
 
     def get(self, flag: str):
         return None
 
     def record(self, **kwargs: Any) -> None:
         self.records.append(kwargs)
+
+    def queue_failure_notification(self, **kwargs: Any) -> None:
+        self.notifications.setdefault(kwargs["flag"], kwargs)
+
+    def pending_failure_notifications(self, *, retry_after_seconds: int, limit: int = 20):
+        del retry_after_seconds, limit
+        return [
+            types.SimpleNamespace(**notification)
+            for flag, notification in self.notifications.items()
+            if not any(attempt_flag == flag and sent for attempt_flag, sent in self.notification_attempts)
+        ]
+
+    def mark_failure_notification_attempt(self, flag: str, *, sent: bool) -> None:
+        self.notification_attempts.append((flag, sent))
 
 
 class MatchingVerifier:
@@ -76,6 +92,11 @@ class MatchingVerifier:
     async def verify(self, *, student_id: str, name: str) -> str:
         self.calls.append((student_id, name))
         return "match"
+
+
+class MismatchVerifier:
+    async def verify(self, *, student_id: str, name: str) -> str:
+        return "mismatch"
 
 
 async def check_policy(module) -> None:
@@ -241,6 +262,44 @@ async def check_transient_llm_retry(module) -> None:
     assert not bot.calls
 
 
+async def check_verification_failure_notifies_admin(module) -> None:
+    Main = module.Main
+    plugin = object.__new__(Main)
+    plugin.enabled_groups = frozenset({"target"})
+    plugin.retry_backoff = 300
+    plugin.scan_interval = 60
+    plugin.store = FakeStore()
+    plugin.verifier = MismatchVerifier()
+    plugin.llm_parser_enabled = True
+    plugin.auto_approve = True
+    plugin.failure_notify_user_id = "24841951"
+
+    async def fake_llm(self, comment: str):
+        return module.ParsedIdentity(name="张三", student_id="12345678"), "ok", False
+
+    plugin._identity_from_llm = types.MethodType(fake_llm, plugin)
+    bot = Bot()
+    await plugin._process_request_locked(
+        {
+            "group_id": "target",
+            "user_id": "123456789",
+            "flag": "mismatch-case",
+            "comment": "张三 12345678",
+        },
+        bot,
+        source="event",
+    )
+
+    assert plugin.store.records[-1]["outcome"] == "manual"
+    assert plugin.store.records[-1]["detail"] == "verify:mismatch"
+    private_calls = [params for action, params in bot.calls if action == "send_private_msg"]
+    assert len(private_calls) == 1
+    assert private_calls[0]["user_id"] == 24841951
+    assert "123456789" in private_calls[0]["message"]
+    assert "mismatch" in private_calls[0]["message"]
+    assert plugin.store.notification_attempts == [("mismatch-case", True)]
+
+
 async def check_already_handled_is_not_counted_as_bot_approval(module) -> None:
     Main = module.Main
     plugin = object.__new__(Main)
@@ -374,6 +433,7 @@ async def main() -> None:
     await check_missing_verifier_skips_llm(module)
     await check_every_request_uses_llm(module)
     await check_transient_llm_retry(module)
+    await check_verification_failure_notifies_admin(module)
     await check_already_handled_is_not_counted_as_bot_approval(module)
     await check_llm_format_error_retries_once(module)
     await check_scan_isolates_request_failures(module)

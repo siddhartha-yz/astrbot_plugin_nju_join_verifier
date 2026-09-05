@@ -18,7 +18,7 @@ from .nju_join_verifier.llm_parser import (
     extract_answer_text,
     parse_llm_identity,
 )
-from .nju_join_verifier.store import ReviewStore
+from .nju_join_verifier.store import FailureNotification, ReviewStore
 from .nju_join_verifier.verifier import (
     IdentityVerifier,
     VerifierAuthenticationError,
@@ -63,6 +63,7 @@ class Main(Star):
         bootstrap_dry_run = bool(config.get("dry_run", True))
         self.scan_interval = max(30, int(config.get("scan_interval_seconds", 60)))
         self.retry_backoff = max(30, int(config.get("retry_backoff_seconds", 300)))
+        self.failure_notify_user_id = str(config.get("failure_notify_user_id", "")).strip()
         self.llm_parser_enabled = bool(
             config.get("llm_parser_enabled", config.get("llm_fallback_enabled", True))
         )
@@ -129,12 +130,13 @@ class Main(Star):
         self._request_locks_guard = asyncio.Lock()
         self._scan_task = asyncio.get_running_loop().create_task(self._scan_loop())
         logger.info(
-            "NJU Join Verifier loaded: groups=%d auto_approve=%s credentials=%s scan=%ds llm_parser=%s",
+            "NJU Join Verifier loaded: groups=%d auto_approve=%s credentials=%s scan=%ds llm_parser=%s failure_notify=%s",
             len(self.enabled_groups),
             self.auto_approve,
             "configured" if self.verifier else "missing",
             self.scan_interval,
             self.llm_parser_enabled,
+            "configured" if self.failure_notify_user_id else "disabled",
         )
 
     @filter.command_group("njuverify")
@@ -510,11 +512,74 @@ class Main(Star):
             outcome="manual",
             detail=f"verify:{result}",
         )
+        if self.failure_notify_user_id:
+            self.store.queue_failure_notification(
+                flag=flag,
+                group_id=group_id,
+                user_id=user_id,
+                result=result,
+            )
+            await self._flush_failure_notifications(bot)
         logger.info(
             "Join request left for manual review: group=%s user=%s verify_result=%s",
             group_id,
             _mask_id(user_id),
             result,
+        )
+
+    async def _flush_failure_notifications(self, bot: Any) -> None:
+        if not self.failure_notify_user_id:
+            return
+        pending = self.store.pending_failure_notifications(
+            retry_after_seconds=max(30, self.scan_interval),
+        )
+        for notification in pending:
+            try:
+                await self._send_failure_notification(bot, notification)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - OneBot notification boundary
+                self.store.mark_failure_notification_attempt(notification.flag, sent=False)
+                logger.warning(
+                    "Join verification failure notification failed: group=%s user=%s error=%s",
+                    notification.group_id,
+                    _mask_id(notification.user_id),
+                    type(exc).__name__,
+                )
+                continue
+            self.store.mark_failure_notification_attempt(notification.flag, sent=True)
+            logger.info(
+                "Join verification failure notification sent: group=%s user=%s result=%s",
+                notification.group_id,
+                _mask_id(notification.user_id),
+                notification.result,
+            )
+
+    async def _send_failure_notification(
+        self,
+        bot: Any,
+        notification: FailureNotification,
+    ) -> None:
+        result_labels = {
+            "mismatch": "姓名与学号不匹配",
+            "not_found": "未找到对应身份",
+            "invalid": "验证信息无效",
+            "exists": "核验服务返回 exists",
+        }
+        label = result_labels.get(notification.result, notification.result)
+        message = (
+            "入群验证未通过，需要人工确认。\n"
+            f"申请人QQ：{notification.user_id}\n"
+            f"群号：{notification.group_id}\n"
+            f"核验结果：{label} ({notification.result})"
+        )
+        notify_user_id: int | str = self.failure_notify_user_id
+        if self.failure_notify_user_id.isdigit():
+            notify_user_id = int(self.failure_notify_user_id)
+        await bot.call_action(
+            "send_private_msg",
+            user_id=notify_user_id,
+            message=message,
         )
 
     async def _request_checked(
@@ -625,6 +690,15 @@ class Main(Star):
                 raise
             except Exception as exc:  # noqa: BLE001 - background loop must fail closed
                 logger.warning("Pending join-request scan failed: %s", type(exc).__name__)
+            try:
+                platform = self._context.get_platform_inst(self.platform_id)
+                bot = getattr(platform, "bot", None) if platform is not None else None
+                if bot is not None:
+                    await self._flush_failure_notifications(bot)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - notification retry must not stop scan loop
+                logger.warning("Failure notification retry failed: %s", type(exc).__name__)
             await asyncio.sleep(self.scan_interval)
 
     async def _scan_pending_requests(self) -> None:

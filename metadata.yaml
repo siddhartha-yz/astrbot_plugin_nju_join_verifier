@@ -3,7 +3,7 @@ display_name: NJU Join Verifier
 desc: Conservative QQ group join verification and auto-approval.
 short_desc: QQ group join verification plugin.
 author: siddhartha-yz
-version: 0.4.1
+version: 0.5.0
 repo: https://github.com/siddhartha-yz/astrbot_plugin_nju_join_verifier
 support_platforms:
   - aiocqhttp

@@ -43,6 +43,12 @@
     "type": "int",
     "default": 300
   },
+  "failure_notify_user_id": {
+    "description": "QQ user ID that receives private messages for definite verification failures",
+    "type": "string",
+    "default": "",
+    "hint": "Only definite verifier failures are reported. Transient network/LLM failures are not sent."
+  },
   "min_verify_interval_seconds": {
     "description": "Minimum delay between verification service requests",
     "type": "float",
