@@ -654,7 +654,7 @@ class Main(Star):
                 "request_type": "group",
                 "sub_type": "add",
                 "group_id": group_id,
-                "user_id": str(item.get("actor") or ""),
+                "user_id": str(item.get("actor") or item.get("invitor_uin") or ""),
                 "comment": str(item.get("message") or ""),
                 "flag": str(item.get("request_id") or ""),
             }

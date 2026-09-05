@@ -329,14 +329,16 @@ async def check_scan_isolates_request_failures(module) -> None:
                     {
                         "request_id": "first",
                         "group_id": "target",
-                        "actor": "10001",
+                        "actor": "",
+                        "invitor_uin": "10001",
                         "checked": False,
                         "message": "张三 12345678",
                     },
                     {
                         "request_id": "second",
                         "group_id": "target",
-                        "actor": "10002",
+                        "actor": "",
+                        "invitor_uin": "10002",
                         "checked": False,
                         "message": "李四 87654321",
                     },
@@ -355,6 +357,7 @@ async def check_scan_isolates_request_failures(module) -> None:
 
     async def fake_process(self, raw, bot, *, source):
         assert source == "scan"
+        assert raw["user_id"] in {"10001", "10002"}
         processed.append(raw["flag"])
         if raw["flag"] == "first":
             raise RuntimeError("simulated request failure")
