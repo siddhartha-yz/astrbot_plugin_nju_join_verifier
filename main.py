@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import time
-from time import monotonic
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+from time import monotonic
 from typing import Any
 
 from astrbot.api import AstrBotConfig, logger
@@ -658,7 +658,17 @@ class Main(Star):
                 "comment": str(item.get("message") or ""),
                 "flag": str(item.get("request_id") or ""),
             }
-            await self._process_request(raw, bot, source="scan")
+            try:
+                await self._process_request(raw, bot, source="scan")
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - isolate each pending request
+                logger.warning(
+                    "Pending join-request processing failed: group=%s user=%s error=%s",
+                    group_id,
+                    _mask_id(raw["user_id"]),
+                    type(exc).__name__,
+                )
 
     async def terminate(self) -> None:
         self._closed = True

@@ -151,23 +151,28 @@ class IdentityVerifier:
     async def _login(self) -> None:
         session = await self._ensure_session()
         login_url = urljoin(self.base_url, "login")
-        async with session.get(login_url, allow_redirects=True) as response:
-            if response.status != 200:
-                raise VerifierAuthenticationError(f"login page status {response.status}")
-            challenge = parse_login_challenge(await response.text())
+        try:
+            async with session.get(login_url, allow_redirects=True) as response:
+                if response.status != 200:
+                    raise VerifierAuthenticationError(f"login page status {response.status}")
+                challenge = parse_login_challenge(await response.text())
 
-        form = {
-            "csrf": challenge.csrf,
-            "username": self.username,
-            "password": self.password,
-            "captcha_token": challenge.captcha_token,
-            "captcha": challenge.captcha_answer,
-        }
-        async with session.post(login_url, data=form, allow_redirects=True) as response:
-            html = await response.text()
-            if response.status != 200 or response.url.path.rstrip("/").endswith("/login"):
-                raise VerifierAuthenticationError("login rejected")
-            self._verify_csrf = parse_verify_csrf(html)
+            form = {
+                "csrf": challenge.csrf,
+                "username": self.username,
+                "password": self.password,
+                "captcha_token": challenge.captcha_token,
+                "captcha": challenge.captcha_answer,
+            }
+            async with session.post(login_url, data=form, allow_redirects=True) as response:
+                html = await response.text()
+                if response.status != 200 or response.url.path.rstrip("/").endswith("/login"):
+                    raise VerifierAuthenticationError("login rejected")
+                self._verify_csrf = parse_verify_csrf(html)
+        except (TimeoutError, aiohttp.ClientError) as exc:
+            raise VerifierError(
+                f"verification network error: {type(exc).__name__}"
+            ) from exc
 
     async def _throttle(self) -> None:
         elapsed = time.monotonic() - self._last_request
@@ -208,7 +213,7 @@ class IdentityVerifier:
                             data = await response.json(content_type=None)
                         except Exception as exc:
                             raise VerifierError("verification service returned non-json") from exc
-                except aiohttp.ClientError as exc:
+                except (TimeoutError, aiohttp.ClientError) as exc:
                     raise VerifierError(
                         f"verification network error: {type(exc).__name__}"
                     ) from exc

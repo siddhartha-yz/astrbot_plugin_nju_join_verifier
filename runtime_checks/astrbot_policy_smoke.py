@@ -314,6 +314,56 @@ async def check_llm_format_error_retries_once(module) -> None:
     assert context.calls == 2
 
 
+async def check_scan_isolates_request_failures(module) -> None:
+    Main = module.Main
+    plugin = object.__new__(Main)
+    plugin.enabled_groups = frozenset({"target"})
+    plugin.platform_id = "napcat"
+    processed: list[str] = []
+
+    class ScanBot:
+        async def call_action(self, action: str, **params: Any):
+            assert action == "get_group_system_msg"
+            return {
+                "join_requests": [
+                    {
+                        "request_id": "first",
+                        "group_id": "target",
+                        "actor": "10001",
+                        "checked": False,
+                        "message": "张三 12345678",
+                    },
+                    {
+                        "request_id": "second",
+                        "group_id": "target",
+                        "actor": "10002",
+                        "checked": False,
+                        "message": "李四 87654321",
+                    },
+                ]
+            }
+
+    class Platform:
+        bot = ScanBot()
+
+    class Context:
+        def get_platform_inst(self, platform_id: str):
+            assert platform_id == "napcat"
+            return Platform()
+
+    plugin._context = Context()
+
+    async def fake_process(self, raw, bot, *, source):
+        assert source == "scan"
+        processed.append(raw["flag"])
+        if raw["flag"] == "first":
+            raise RuntimeError("simulated request failure")
+
+    plugin._process_request = types.MethodType(fake_process, plugin)
+    await plugin._scan_pending_requests()
+    assert processed == ["first", "second"]
+
+
 async def main() -> None:
     module = load_main_module()
     await check_policy(module)
@@ -323,6 +373,7 @@ async def main() -> None:
     await check_transient_llm_retry(module)
     await check_already_handled_is_not_counted_as_bot_approval(module)
     await check_llm_format_error_retries_once(module)
+    await check_scan_isolates_request_failures(module)
     print("astrbot_policy_smoke=ok")
 
 
