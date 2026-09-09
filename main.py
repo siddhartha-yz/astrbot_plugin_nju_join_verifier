@@ -128,6 +128,10 @@ class Main(Star):
         self._request_locks: dict[str, asyncio.Lock] = {}
         self._request_lock_users: dict[str, int] = {}
         self._request_locks_guard = asyncio.Lock()
+        # Immediate delivery and the periodic retry loop can flush the same
+        # durable notification queue concurrently. Serialize flushes so an
+        # unsent row cannot be observed and delivered twice before it is marked.
+        self._failure_notification_flush_lock = asyncio.Lock()
         self._scan_task = asyncio.get_running_loop().create_task(self._scan_loop())
         logger.info(
             "NJU Join Verifier loaded: groups=%d auto_approve=%s credentials=%s scan=%ds llm_parser=%s failure_notify=%s",
@@ -530,30 +534,31 @@ class Main(Star):
     async def _flush_failure_notifications(self, bot: Any) -> None:
         if not self.failure_notify_user_id:
             return
-        pending = self.store.pending_failure_notifications(
-            retry_after_seconds=max(30, self.scan_interval),
-        )
-        for notification in pending:
-            try:
-                await self._send_failure_notification(bot, notification)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:  # noqa: BLE001 - OneBot notification boundary
-                self.store.mark_failure_notification_attempt(notification.flag, sent=False)
-                logger.warning(
-                    "Join verification failure notification failed: group=%s user=%s error=%s",
+        async with self._failure_notification_flush_lock:
+            pending = self.store.pending_failure_notifications(
+                retry_after_seconds=max(30, self.scan_interval),
+            )
+            for notification in pending:
+                try:
+                    await self._send_failure_notification(bot, notification)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001 - OneBot notification boundary
+                    self.store.mark_failure_notification_attempt(notification.flag, sent=False)
+                    logger.warning(
+                        "Join verification failure notification failed: group=%s user=%s error=%s",
+                        notification.group_id,
+                        _mask_id(notification.user_id),
+                        type(exc).__name__,
+                    )
+                    continue
+                self.store.mark_failure_notification_attempt(notification.flag, sent=True)
+                logger.info(
+                    "Join verification failure notification sent: group=%s user=%s result=%s",
                     notification.group_id,
                     _mask_id(notification.user_id),
-                    type(exc).__name__,
+                    notification.result,
                 )
-                continue
-            self.store.mark_failure_notification_attempt(notification.flag, sent=True)
-            logger.info(
-                "Join verification failure notification sent: group=%s user=%s result=%s",
-                notification.group_id,
-                _mask_id(notification.user_id),
-                notification.result,
-            )
 
     async def _send_failure_notification(
         self,

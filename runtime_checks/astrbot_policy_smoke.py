@@ -273,6 +273,7 @@ async def check_verification_failure_notifies_admin(module) -> None:
     plugin.llm_parser_enabled = True
     plugin.auto_approve = True
     plugin.failure_notify_user_id = "24841951"
+    plugin._failure_notification_flush_lock = asyncio.Lock()
 
     async def fake_llm(self, comment: str):
         return module.ParsedIdentity(name="张三", student_id="12345678"), "ok", False
@@ -298,6 +299,37 @@ async def check_verification_failure_notifies_admin(module) -> None:
     assert "123456789" in private_calls[0]["message"]
     assert "mismatch" in private_calls[0]["message"]
     assert plugin.store.notification_attempts == [("mismatch-case", True)]
+
+
+async def check_failure_notification_flush_is_serialized(module) -> None:
+    Main = module.Main
+    plugin = object.__new__(Main)
+    plugin.failure_notify_user_id = "24841951"
+    plugin.scan_interval = 60
+    plugin.store = FakeStore()
+    plugin._failure_notification_flush_lock = asyncio.Lock()
+    plugin.store.queue_failure_notification(
+        flag="race",
+        group_id="target",
+        user_id="123456789",
+        result="mismatch",
+    )
+    send_count = 0
+
+    async def fake_send(self, bot, notification):
+        nonlocal send_count
+        del bot, notification
+        send_count += 1
+        await asyncio.sleep(0.03)
+
+    plugin._send_failure_notification = types.MethodType(fake_send, plugin)
+    bot = Bot()
+    await asyncio.gather(
+        plugin._flush_failure_notifications(bot),
+        plugin._flush_failure_notifications(bot),
+    )
+    assert send_count == 1
+    assert plugin.store.notification_attempts == [("race", True)]
 
 
 async def check_already_handled_is_not_counted_as_bot_approval(module) -> None:
@@ -434,6 +466,7 @@ async def main() -> None:
     await check_every_request_uses_llm(module)
     await check_transient_llm_retry(module)
     await check_verification_failure_notifies_admin(module)
+    await check_failure_notification_flush_is_serialized(module)
     await check_already_handled_is_not_counted_as_bot_approval(module)
     await check_llm_format_error_retries_once(module)
     await check_scan_isolates_request_failures(module)
